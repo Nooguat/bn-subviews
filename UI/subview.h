@@ -26,15 +26,34 @@ public:
     virtual void OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* frame) override;
     virtual void OnViewChange(UIContext *context, ViewFrame *frame, const QString &type) override;
     static void init();
-    void addView(UIContext *context, QString viewtype);
+    static void openView(const UIActionContext& action);
+
+    static void addView(UIContext *context, QString viewtype);
     static void hideSidebar(const UIActionContext& action);
     static void openLinearView(UIContext* context, ViewFrame* vf);
     static void openCFGView(UIContext* context, ViewFrame* vf);
     static void reloadModule(const UIActionContext& action);
+    static void NavigateBack(const UIActionContext& context);
+    // Need those as the 'navigate' action is not replicated when moving the LV
+    static void back(const UIActionContext& context);
+    static void forward(const UIActionContext& context);
 private:
     static bool m_hide;
+    static int m_cfg_count;
 };
 
+
+class ContainerFilter : public QObject {
+
+};
+
+class ClickFilter : public QObject {
+public:
+    ClickFilter(QMainWindow* main);
+    bool eventFilter(QObject *watched, QEvent *event) override;
+private:
+    QMainWindow* m_main;
+};
 
 class LinearPane : public LinearView {
 public:

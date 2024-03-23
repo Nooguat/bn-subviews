@@ -19,6 +19,7 @@
 #include <qalgorithms.h>
 #include <qboxlayout.h>
 #include <qbrush.h>
+#include <qcoreevent.h>
 #include <qdialog.h>
 #include <qgesturerecognizer.h>
 #include <qglobal.h>
@@ -28,6 +29,8 @@
 #include <qmainwindow.h>
 #include <qmessagebox.h>
 #include <qnamespace.h>
+#include <qobject.h>
+#include <qshortcut.h>
 #include <qsizepolicy.h>
 #include <qsplitter.h>
 #include <stack>
@@ -45,15 +48,13 @@
 #include "ui/disassemblyview.h"
 
 // TODO Fix the different crashes
-// TODO Add an option to enable/disable the module
+// Crashing when moving the containers
 SubView* SubView::m_instance = nullptr;
 bool SubView::m_hide = false;
 DockableTabCollection* collection = new DockableTabCollection();
-auto disabled = BinaryNinja::Metadata(false);
-auto enabled = BinaryNinja::Metadata(true);
 
 // TODO Expose those as settings in BN
-std::set<QString> disabled_views = {"Console", "Log", "Other (Compatibility)", "Mini Graph", "Stack Trace", "Debugger Modules", "Find"};
+std::set<QString> disabled_views;
 // Need to hardcode those names this since there are not part of v3 GlobalArea anymore
 std::set<QString> area_wigets = {"ScriptingConsole", "LogView"};
 std::set<QString> refreshable_views = {"StackView", "LinearView", "VariableList"};
@@ -98,31 +99,36 @@ QMenu* findMenu(QList<QAction*> actions, QString name){
     return nullptr;
 }
 
-QObject* get_parent_from_type(QObject* base, std::string className){
-    QObject* parent = base;
-    while(parent->parent() != nullptr){
-        if(className.compare(parent->metaObject()->className()) == 0){
-            qDebug() << "found parent !";
-            return parent;
-        }
-        qDebug() << parent->metaObject()->className();
-        parent = parent->parent();
-    }
-    return nullptr;
-}
-
 SubViewBarStyle::SubViewBarStyle() : DockableTabStyle()
 {}
+
+ClickFilter::ClickFilter(QMainWindow* main) : QObject(){
+    m_main = main;
+}
+
+bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
+    if(event->type() == QEvent::MouseButtonRelease){
+        auto linearview = static_cast<LinearView*>(watched);
+        auto CFGWidgets = m_main->findChildren<DisassemblyContainer*>();
+        if(CFGWidgets.size() != 0){
+            for(auto widget : CFGWidgets){
+                auto disass = widget->getDisassembly();
+                // Those two are needed
+                widget->setCurrentFunction(linearview->getCurrentFunction());
+                disass->navigateToFunction(linearview->getCurrentFunction(), 0);
+                widget->repaint();
+            }
+    }
+        qDebug() << watched->metaObject()->className();
+    }
+    return false;
+}
 
 void SubViewBarStyle::paintTab(const QWidget* widget, QStylePainter& p, const DockableTabInfo& info, int idx, int count, int active, DockableTabInteractionState state, const QRect& rect) const{
 
 // TODO Implement this
 }
 
-void SubView::reloadModule(const UIActionContext& action){
-    UIContext* context = action.context;
-    BinaryViewRef bv = context->getAvailableBinaryViews()[0].first;
-}
 void SubView::hideSidebar(const UIActionContext& action){
     UIContext* context = action.context;
     QMainWindow* main = context->mainWindow();
@@ -131,7 +137,7 @@ void SubView::hideSidebar(const UIActionContext& action){
         child->setVisible(m_hide);
     }
     auto children_widgets = main->findChildren<SidebarWidgetAndHeader*>();
-
+;
     for(auto child : children_widgets){
         if(area_wigets.find(child->widget()->metaObject()->className())!= area_wigets.end()){
             continue;
@@ -169,27 +175,38 @@ void TabPane::updateStatus(){
 
 void SubView::init()
 {
-
     m_instance = new SubView();
     // TODO Update disabled views here from settings
     UIContext::registerNotification(m_instance);
     UIAction::registerAction("Hide Sidebar");
-    UIAction::registerAction("Toggle Subviews");
+    UIAction::registerAction("Go back");
+    UIAction::registerAction("Go forward");
     auto actions = UIActionHandler::globalActions();
     actions->bindAction("Hide Sidebar", UIAction(SubView::hideSidebar));
-    actions->bindAction("Toggle Subviews", UIAction(SubView::reloadModule));
+    actions->bindAction("Go back", UIAction(SubView::back));
+    actions->bindAction("Go forward", UIAction(SubView::forward));
 }
 
+void SubView::back(const UIActionContext& context){
+    auto ctx = context.context;
+    auto vf = ctx->getCurrentViewFrame();
+    vf->back();
+}
 
+void SubView::forward(const UIActionContext& context){
+    auto ctx = context.context;
+    auto vf = ctx->getCurrentViewFrame();
+    vf->forward();
+}
 
 void SubView::addView(UIContext *context, QString viewtype){
     QMainWindow* main = context->mainWindow();
     ViewFrame* frame = context->getCurrentViewFrame();
-    BinaryViewRef bv = context->getAvailableBinaryViews()[0].first;
     if(frame == nullptr){
         qDebug() << "frame is null";
         return;
     }
+    BinaryViewRef bv = frame->getCurrentBinaryView();
     auto vp = frame->parent();
     if(vp == nullptr){
         qDebug() << "vp is null";
@@ -209,8 +226,7 @@ void SubView::addView(UIContext *context, QString viewtype){
         auto newview = type->createWidget(frame, bv);
         auto header = newview->headerWidget();
         // This needs to be called in this order,
-        // trying to call setVisible afterwards makes everything
-        // segfault
+        // trying to call setVisible afterwards makes everything segfault
         if(header != nullptr){
             header->setVisible(true);
             view->addWidget(header);
@@ -224,7 +240,7 @@ void SubView::addView(UIContext *context, QString viewtype){
 }
 
 void SubView::openCFGView(UIContext *context, ViewFrame *vf){
-    BinaryViewRef bv = context->getAvailableBinaryViews()[0].first;
+    BinaryViewRef bv = context->getCurrentViewFrame()->getCurrentBinaryView();
     auto vp = vf->parent();
     QMainWindow* main = context->mainWindow();
     auto linearviews = main->findChildren<LinearView*>();
@@ -235,59 +251,66 @@ void SubView::openCFGView(UIContext *context, ViewFrame *vf){
     }
     auto flowGraph = new DisassemblyContainer((QWidget*)vf->parent(), bv, vf, linearview->getCurrentFunction());
     SplitPaneContainer* container = static_cast<SplitPaneContainer*>(vp->parent());
-    SplitPaneContainer* split_container = static_cast<SplitPaneContainer*>(vf->parent()->parent());
     TabPane* newpane = new TabPane(new SplitTabWidget(collection), flowGraph, "FlowGraph");
     container->open(newpane, Qt::Orientation::Horizontal);
 }
 
+
 void SubView::openLinearView(UIContext *context, ViewFrame* vf){
-    BinaryViewRef bv = context->getAvailableBinaryViews()[0].first;
+    BinaryViewRef bv = context->getCurrentViewFrame()->getCurrentBinaryView();
     SplitPaneContainer* split_container = static_cast<SplitPaneContainer*>(vf->parent()->parent());
     QMainWindow* main = context->mainWindow();
     auto linearviews = main->findChildren<LinearView*>();
     auto container = new SplitTabWidget(collection);
     int counter = 0;
     for(auto linear : linearviews){
+        if(linear->getData() != bv){
+            continue;
+        }
+        linear->installEventFilter(new ClickFilter(main));
         QString viewname = QString("LinearView %1").arg(QString::number(counter++));
         auto header_status = linear->getStatusBarWidget();
         auto header_options = linear->getHeaderOptionsWidget();
         auto header_subtypes = linear->getHeaderSubtypeWidget();
         QSplitter* widget = new QSplitter();
         QSplitter* header = new QSplitter();
+        header->setSizes(QList<int>{1, INT_MAX});
         header->addWidget(header_options);
+        static_cast<QWidget*>(header_status->children()[2])->setVisible(false);
         header->addWidget(header_status);
-
+        header->setStretchFactor(0, 0);
+        header->setStretchFactor(1, 1);
         widget->setOrientation(Qt::Orientation::Vertical);
         widget->addWidget(header);
         widget->addWidget(linear);
         TabPane* newpane = new TabPane(container, widget, viewname.toStdString().c_str());
-        // header_status->setParent(newpane);
-        // header_options->setParent(newpane);
-        // header_subtypes->setParent(newpane);
+
         split_container->open(newpane, Qt::Orientation::Horizontal);
         // Needed to remove all references to previous splitpanecontainer
         QWidget* vp = (QWidget*)vf->parent();
         QWidget* vpp = (QWidget*)vp->parent();
-        for(auto child : split_container->children()){
-            qDebug() << child->metaObject()->className();
-        }
         auto controller = (QWidget*)split_container->parent();
+        auto sks = vpp->findChildren<QShortcut*>();
+        for(auto s : sks){
+            s->setParent(controller);
+        }
         controller->update();
         controller->updateGeometry();
         split_container->layout()->update();
         vp->close();
         vpp->close();
-        // linear->close();
     }
 }
 
 void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* frame){
-    auto bvs = context->getAvailableBinaryViews();
-    if(!bvs.empty()){
-        auto bv = bvs[0].first;
-        auto scope = SettingsResourceScope;
-        auto settings = BinaryNinja::Settings::Instance();
-        settings->RegisterGroup("subviews", "Subview");
+    auto bv = context->getCurrentViewFrame()->getCurrentBinaryView();
+    if(bv == nullptr){
+        return;
+    }
+    auto scope = SettingsResourceScope;
+    auto settings = BinaryNinja::Settings::Instance();
+    settings->RegisterGroup("subviews", "Subview");
+    if(!settings->Contains("subviews.enabled")){
         settings->RegisterSetting("subviews.enabled",R"({
         "title" : "Toggle the usage of subviews module",
         "type" : "number",
@@ -295,17 +318,25 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
         "ignore" : ["SettingsProjectScope", "SettingsUserScope"],
         "requiresRestart" : true
         })");
-        // TODO Add the disabled views array setting
-        // settings->RegisterSetting("subviews.diabled_views", R"({
-
-        // })");
-        auto val = settings->Get<int64_t>("subviews.enabled", bv);
-        if(val == 2){
-            // This crashes, find why
-            // UIContext::unregisterNotification(m_instance);
-            return;
-        }
-        // settings->Set("subviews.enabled", 10, bv, scope);
+    }
+    if(!settings->Contains("subviews.disabled_views")){
+        settings->RegisterSetting("subviews.disabled_views", R"|({
+        "title" : "Lists the widgets that should be disabled",
+        "type" : "array",
+        "elementType" : "string",
+        "default" : ["Console", "Log", "Mini Graph", "Stack Trace", "Debugger Modules", "Find", "Other (Compatibility)"],
+        "description" : "Blacklist widgets from the view submenu to prevent any crash",
+        "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
+        })|");
+    }
+    auto val = settings->Get<int64_t>("subviews.enabled", bv);
+    if(val == 2){
+        // This crashes, find why
+        // UIContext::unregisterNotification(m_instance);
+        return;
+    }
+    auto disabled = settings->Get<std::vector<std::string>>("subviews.disabled_views", bv); for(auto d : disabled){
+        disabled_views.insert(QString(d.c_str()));
     }
     QMenuBar* menuBar = context->mainWindow()->menuBar();
     QMainWindow* main = context->mainWindow();
@@ -316,21 +347,22 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     QMenu* subviews = new QMenu("Subviews");
     auto sidebar = context->sidebar();
     auto types = sidebar->types();
+    auto actions = context->contentActionHandler();
     for(auto type: types){
         if(disabled_views.find(type->name()) != disabled_views.end()){
             continue;
         }
         QAction *openSubView = new QAction(type->name());
-        QObject::connect(openSubView, &QAction::triggered, new QWidget(), [=](){
         QString actionName = QString("Open ") + type->name();
         UIAction::registerAction(actionName);
-        auto actions = UIActionHandler::globalActions();
-        actions->bindAction(actionName, UIAction(SubView::hideSidebar));
-        addView(context, type->name());
+        actions->bindAction(actionName, UIAction([=](){
+            addView(context, type->name());
+        }));
+        QObject::connect(openSubView, &QAction::triggered, new QWidget(), [=](){
+            addView(context, type->name());
         });
         subviews->addAction(openSubView);
     }
-    // Add open linear view
     QAction *openSubView = new QAction("Linear View");
     QObject::connect(openSubView, &QAction::triggered, new QWidget(), [=](){
         openLinearView(context, context->getCurrentViewFrame());
@@ -351,6 +383,11 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     openLinearView(context, frame);
 }
 
+void SubView::NavigateBack(const UIActionContext& context){
+    qDebug() << "called !";
+}
+
+
 void SubView::OnContextOpen(UIContext* context)
 {
 }
@@ -359,7 +396,6 @@ void SubView::OnContextClose(UIContext* context)
 {
     // TODO Clean up all views
 }
-
 void SubView::OnViewChange(UIContext *context, ViewFrame *frame, const QString &type)
 {
     auto bvs = context->getAvailableBinaryViews();
@@ -369,7 +405,24 @@ void SubView::OnViewChange(UIContext *context, ViewFrame *frame, const QString &
     auto linearviews = main->findChildren<LinearView*>();
     LinearView* linearview;
     if(linearviews.size() != 0){
-        linearview = linearviews[0];
+        for(auto linear : linearviews){
+            // This could happen if the cfg action in still binded
+            if(!linear->isVisible()){
+                linear->setVisible(true);
+            }
+        }
+    }
+    else{
+        if(!bvs.empty()){
+            QMessageBox::critical(main, "Binary Ninja", "Did not found any linear view in current binary view. This will lead to unrepairable errors, Reloading");
+            for(auto pairs : bvs){
+                auto bv = pairs.first;
+                bv->SaveAutoSnapshot();
+            }
+            auto handler = context->getCurrentActionHandler();
+            handler->executeAction("Restart Binary Ninja");
+            return;
+        }
     }
     auto subviews = main->findChildren<TabPane*>();
     for(auto subview : subviews){
@@ -383,15 +436,5 @@ void SubView::OnViewChange(UIContext *context, ViewFrame *frame, const QString &
 
     // Working, need to find a more global way to work
     // Override onclick event for linearview
-    auto CFGWidgets = main->findChildren<DisassemblyContainer*>();
-    if(CFGWidgets.size() != 0){
-        for(auto widget : CFGWidgets){
-            auto disass = widget->getDisassembly();
-            // Those two are needed
-            widget->setCurrentFunction(linearview->getCurrentFunction());
-            disass->navigateToFunction(linearview->getCurrentFunction(), 0);
-            widget->repaint();
-        }
-    }
 }
 
