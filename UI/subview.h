@@ -27,7 +27,6 @@ public:
     virtual void OnViewChange(UIContext *context, ViewFrame *frame, const QString &type) override;
     static void init();
     static void openView(const UIActionContext& action);
-
     static void addView(UIContext *context, QString viewtype);
     static void hideSidebar(const UIActionContext& action);
     static void openLinearView(UIContext* context, ViewFrame* vf);
@@ -44,7 +43,21 @@ private:
 
 
 class ContainerFilter : public QObject {
+public:
+    ContainerFilter(QMainWindow* main);
+    ContainerFilter(){};
+    bool eventFilter(QObject* watched, QEvent* event) override;
+private:
+    QMainWindow* m_main;
+};
 
+class TabFilter : public QObject {
+public:
+    TabFilter(QMainWindow* main);
+    TabFilter(){};
+    bool eventFilter(QObject* watched, QEvent* event) override;
+private:
+    QMainWindow* m_main;
 };
 
 class ClickFilter : public QObject {
@@ -77,6 +90,9 @@ public:
     TabPane(SplitTabWidget* container, QWidget* widget, QString title, PaneHeader* header=nullptr);
     virtual QString title() override {return m_title;};
     virtual void updateStatus() override;
+    virtual bool event(QEvent* event) override;
+    SplitTabWidget* getContainer() {return m_container;};
+
 Q_SIGNALS:
     void updateWidgetStatus();
 };

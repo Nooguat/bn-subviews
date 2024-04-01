@@ -53,11 +53,10 @@ SubView* SubView::m_instance = nullptr;
 bool SubView::m_hide = false;
 DockableTabCollection* collection = new DockableTabCollection();
 
-// TODO Expose those as settings in BN
 std::set<QString> disabled_views;
 // Need to hardcode those names this since there are not part of v3 GlobalArea anymore
 std::set<QString> area_wigets = {"ScriptingConsole", "LogView"};
-std::set<QString> refreshable_views = {"StackView", "LinearView", "VariableList"};
+std::set<QString> refreshable_views;
 QLayout* findParentLayout(QWidget* w, QLayout* topLevelLayout)
 {
     for (QObject* qo: topLevelLayout->children())
@@ -106,6 +105,19 @@ ClickFilter::ClickFilter(QMainWindow* main) : QObject(){
     m_main = main;
 }
 
+ContainerFilter::ContainerFilter(QMainWindow* main) : QObject(){
+    m_main = main;
+}
+
+TabFilter::TabFilter(QMainWindow* main) : QObject(){
+    m_main = main;
+}
+
+bool TabFilter::eventFilter(QObject* watched, QEvent*event){
+    qDebug() << watched->metaObject()->className() << event;
+    return true;
+}
+
 bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
     if(event->type() == QEvent::MouseButtonRelease){
         auto linearview = static_cast<LinearView*>(watched);
@@ -122,6 +134,22 @@ bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
         qDebug() << watched->metaObject()->className();
     }
     return false;
+}
+
+bool ContainerFilter::eventFilter(QObject* watched, QEvent* event){
+    // For split windows :
+     // ChildAdded
+     // ChildPolished
+    // Need to find which events we should use for tabs
+    // TODO Create filter checking on qevent leave if the container is empty close it
+    if(event->type() == QEvent::Leave){
+       auto container = static_cast<SplitPaneContainer*>(watched);
+       auto pane = container->currentPane();
+       qDebug() << "children :" << pane->widget();
+    }
+    qDebug() << watched->metaObject()->className() << event->type();
+    event->ignore();
+    return true;
 }
 
 void SubViewBarStyle::paintTab(const QWidget* widget, QStylePainter& p, const DockableTabInfo& info, int idx, int count, int active, DockableTabInteractionState state, const QRect& rect) const{
@@ -152,9 +180,11 @@ void SubView::hideSidebar(const UIActionContext& action){
 TabPane::TabPane(SplitTabWidget* container, QWidget* widget, QString name, PaneHeader* default_header) : Pane(container){
     if(default_header == nullptr){
         auto header = new WidgetPaneHeader("");
+        // header->installEventFilter(new ContainerFilter());
         Pane::init(header);
     }
     else{
+        // default_header->installEventFilter(new ContainerFilter());
         Pane::init(default_header);
     }
     container->addTab(widget, name);
@@ -172,6 +202,13 @@ void TabPane::updateStatus(){
     updateWidgetStatus();
     return Pane::updateStatus();
 }
+
+
+bool TabPane::event(QEvent* event){
+    // qDebug() << event;
+    return QWidget::event(event);
+}
+
 
 void SubView::init()
 {
@@ -229,11 +266,24 @@ void SubView::addView(UIContext *context, QString viewtype){
         // trying to call setVisible afterwards makes everything segfault
         if(header != nullptr){
             header->setVisible(true);
+            header->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
             view->addWidget(header);
         }
         view->addWidget(newview);
-        TabPane* newpane = new TabPane(new SplitTabWidget(collection), view, type->name());
+        auto splitw = new SplitTabWidget(collection);
+        TabPane* newpane = new TabPane(splitw, view, type->name());
+        QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](){
+            qDebug() << "called";
+            auto container = splitw->findChild<DockableTabWidget*>();
+            qDebug() << container->currentWidget();
+            if(container->currentWidget() == nullptr){
+                auto parent = splitw->parent();
+                container->close();
+                splitw->close();
+            }
+        });
         container->open(newpane, Qt::Orientation::Horizontal);
+        newpane->parent()->installEventFilter(new ContainerFilter(main));
         }
     }
 
@@ -258,7 +308,7 @@ void SubView::openCFGView(UIContext *context, ViewFrame *vf){
 
 void SubView::openLinearView(UIContext *context, ViewFrame* vf){
     BinaryViewRef bv = context->getCurrentViewFrame()->getCurrentBinaryView();
-    SplitPaneContainer* split_container = static_cast<SplitPaneContainer*>(vf->parent()->parent());
+    SplitPaneContainer* split_container = (SplitPaneContainer*)vf->parent()->parent();
     QMainWindow* main = context->mainWindow();
     auto linearviews = main->findChildren<LinearView*>();
     auto container = new SplitTabWidget(collection);
@@ -286,19 +336,11 @@ void SubView::openLinearView(UIContext *context, ViewFrame* vf){
         TabPane* newpane = new TabPane(container, widget, viewname.toStdString().c_str());
 
         split_container->open(newpane, Qt::Orientation::Horizontal);
-        // Needed to remove all references to previous splitpanecontainer
-        QWidget* vp = (QWidget*)vf->parent();
-        QWidget* vpp = (QWidget*)vp->parent();
-        auto controller = (QWidget*)split_container->parent();
-        auto sks = vpp->findChildren<QShortcut*>();
-        for(auto s : sks){
-            s->setParent(controller);
-        }
-        controller->update();
-        controller->updateGeometry();
-        split_container->layout()->update();
-        vp->close();
-        vpp->close();
+        auto root = split_container->root();
+        auto splitter = root->findChild<Splitter*>();
+        // As the children are listed from the first to the last, it should be this one everytime
+        auto old_container = splitter->findChildren<SplitPaneContainer*>()[0];
+        old_container->close();
     }
 }
 
@@ -329,6 +371,17 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
         "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
         })|");
     }
+ // = {"StackView", "LinearView", "VariableList"};
+    if(!settings->Contains("subviews.refreshable_views")){
+        settings->RegisterSetting("subviews.refreshable_views", R"|({
+        "title" : "Lists the widgets that should refreshed on click",
+        "type" : "array",
+        "elementType" : "string",
+        "default" : ["StackView", "VariableList"],
+        "description" : "Refresh widget content when clicking in linearview",
+        "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
+        })|");
+    }
     auto val = settings->Get<int64_t>("subviews.enabled", bv);
     if(val == 2){
         // This crashes, find why
@@ -338,16 +391,19 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     auto disabled = settings->Get<std::vector<std::string>>("subviews.disabled_views", bv); for(auto d : disabled){
         disabled_views.insert(QString(d.c_str()));
     }
+    auto refresh = settings->Get<std::vector<std::string>>("subviews.refreshable_views", bv); for(auto f : refresh){
+        refreshable_views.insert(QString(f.c_str()));
+    }
     QMenuBar* menuBar = context->mainWindow()->menuBar();
     QMainWindow* main = context->mainWindow();
     QMenu* views = findMenu(menuBar->actions(), "View");
+    auto actions = context->contentActionHandler();
     if(views == nullptr){
         return;
     }
     QMenu* subviews = new QMenu("Subviews");
     auto sidebar = context->sidebar();
     auto types = sidebar->types();
-    auto actions = context->contentActionHandler();
     for(auto type: types){
         if(disabled_views.find(type->name()) != disabled_views.end()){
             continue;
@@ -369,24 +425,25 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     });
     QString actionName = QString("Open Linear View");
     UIAction::registerAction(actionName);
+    actions->bindAction(actionName, UIAction([=](){
+        openLinearView(context, context->getCurrentViewFrame());
+    }));
     subviews->addAction(openSubView);
     views->addMenu(subviews);
     // Add open cfg view
     QAction *openCFG = new QAction("CFG View");
+    QString actionNameCFG = QString("Open CFG View");
+    UIAction::registerAction(actionNameCFG);
+    actions->bindAction(actionNameCFG, UIAction([=](){
+        openCFGView(context, context->getCurrentViewFrame());
+    }));
     QObject::connect(openCFG, &QAction::triggered, new QWidget(), [=](){
         openCFGView(context, context->getCurrentViewFrame());
     });
-    QString actionNameCFG = QString("Open CFG");
-    UIAction::registerAction(actionNameCFG);
     subviews->addAction(openCFG);
     views->addMenu(subviews);
     openLinearView(context, frame);
 }
-
-void SubView::NavigateBack(const UIActionContext& context){
-    qDebug() << "called !";
-}
-
 
 void SubView::OnContextOpen(UIContext* context)
 {
@@ -415,26 +472,14 @@ void SubView::OnViewChange(UIContext *context, ViewFrame *frame, const QString &
     else{
         if(!bvs.empty()){
             QMessageBox::critical(main, "Binary Ninja", "Did not found any linear view in current binary view. This will lead to unrepairable errors, Reloading");
-            for(auto pairs : bvs){
-                auto bv = pairs.first;
-                bv->SaveAutoSnapshot();
-            }
+            // This will probably always crash
+            // for(auto pairs : bvs){
+            //     auto bv = pairs.first;
+            //     bv->SaveAutoSnapshot();
+            // }
             auto handler = context->getCurrentActionHandler();
             handler->executeAction("Restart Binary Ninja");
-            return;
         }
     }
-    auto subviews = main->findChildren<TabPane*>();
-    for(auto subview : subviews){
-        auto tab = subview->findChild<SplitTabWidget*>();
-        auto widgets = subview->findChild<DockableTabWidget*>();
-        if(widgets->count() == 0){
-            QWidget* parent = static_cast<QWidget*>(subview->parent());
-            parent->close();
-        }
-    }
-
-    // Working, need to find a more global way to work
-    // Override onclick event for linearview
 }
 
