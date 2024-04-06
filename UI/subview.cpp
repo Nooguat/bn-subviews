@@ -16,6 +16,7 @@
 #include <fmt/core.h>
 #include <fmt/ranges.h>
 #include <ios>
+#include <qaccessible_base.h>
 #include <qalgorithms.h>
 #include <qboxlayout.h>
 #include <qbrush.h>
@@ -40,6 +41,7 @@
 #include "BWindow.h"
 #include "binaryninja-api/ui/linearview.h"
 #include "ui/sidebaricons.h"
+#include "ui/sidebarwidget.h"
 #include "ui/stackview.h"
 #include "ui/tabwidget.h"
 #include "ui/typeview.h"
@@ -82,6 +84,18 @@ QLayout* findParentLayout(QWidget* w)
     if (w->parentWidget() != nullptr)
         if (w->parentWidget()->layout() != nullptr)
             return findParentLayout(w, w->parentWidget()->layout());
+    return nullptr;
+}
+
+QObject* get_parent_from_type(QObject* base, std::string className){
+    QObject* parent = base->parent();
+    while(parent != nullptr){
+        qDebug() << parent->metaObject()->className();
+        if(className.compare(parent->metaObject()->className()) == 0){
+            return parent;
+        }
+        parent = parent->parent();
+    }
     return nullptr;
 }
 
@@ -131,23 +145,47 @@ bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
                 widget->repaint();
             }
     }
-        qDebug() << watched->metaObject()->className();
     }
     return false;
 }
 
 bool ContainerFilter::eventFilter(QObject* watched, QEvent* event){
-    // For split windows :
-     // ChildAdded
-     // ChildPolished
     // Need to find which events we should use for tabs
-    // TODO Create filter checking on qevent leave if the container is empty close it
-    if(event->type() == QEvent::Leave){
-       auto container = static_cast<SplitPaneContainer*>(watched);
-       auto pane = container->currentPane();
-       qDebug() << "children :" << pane->widget();
+    if(event->type() == QEvent::Leave || event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildPolished || event->type() == QEvent::ChildRemoved){
+        // Not working for some reason, returns NULL object
+        auto main = get_parent_from_type(watched, "MainWindow");
+        qDebug() << main;
+        for(auto child : main->findChildren<SplitPaneContainer*>()){
+            if(child->findChild<SplitPaneContainer*>() != nullptr || child->findChild<LinearView*>() != nullptr){
+                continue;
+            }
+            if(child->findChild<ViewPane*>() != nullptr ){
+                qDebug() << "found a match !" << child->children();
+                child->setVisible(false);
+                // if(child->isVisible()){
+                //     child->setVisible(false);
+                // }
+            }
+            else if(child->findChild<TabPane*>() != nullptr){
+               auto pane = child->findChild<TabPane*>();
+               auto widget = child->findChild<SidebarWidget*>();
+               if(widget == nullptr){
+                    qDebug() << "no widget !";
+                    pane->closePane();
+                    child->close();
+               }
+               // auto widget = (SplitTabWidget*)pane->widget();
+               qDebug() << "pane widgets " << pane->children();
+               // if(pane->widget() == nullptr){
+               //      pane->close();
+               // }
+            }
+            else{
+                qDebug() << "closing" << child->children();
+                child->close();
+            }
+        }
     }
-    qDebug() << watched->metaObject()->className() << event->type();
     event->ignore();
     return true;
 }
@@ -205,15 +243,19 @@ void TabPane::updateStatus(){
 
 
 bool TabPane::event(QEvent* event){
-    // qDebug() << event;
     return QWidget::event(event);
+}
+
+ViewFrame* TabPane::viewFrame() const{
+    auto widget = this->widget();
+    auto viewframe = widget->findChild<ViewFrame*>();
+    return viewframe;
 }
 
 
 void SubView::init()
 {
     m_instance = new SubView();
-    // TODO Update disabled views here from settings
     UIContext::registerNotification(m_instance);
     UIAction::registerAction("Hide Sidebar");
     UIAction::registerAction("Go back");
@@ -244,15 +286,9 @@ void SubView::addView(UIContext *context, QString viewtype){
         return;
     }
     BinaryViewRef bv = frame->getCurrentBinaryView();
-    auto vp = frame->parent();
-    if(vp == nullptr){
-        qDebug() << "vp is null";
-        return;
-    }
-    SplitPaneContainer* container = static_cast<SplitPaneContainer*>(vp->parent());
+    auto container = (SplitPaneContainer*)get_parent_from_type(frame, "SplitPaneContainer");
     if(container == nullptr){
-        qDebug() << "container is null";
-        return;
+        qDebug() << "parent is null";
     }
     auto sidebar = context->sidebar();
     auto types = sidebar->types();
@@ -273,13 +309,13 @@ void SubView::addView(UIContext *context, QString viewtype){
         auto splitw = new SplitTabWidget(collection);
         TabPane* newpane = new TabPane(splitw, view, type->name());
         QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](){
-            qDebug() << "called";
             auto container = splitw->findChild<DockableTabWidget*>();
             qDebug() << container->currentWidget();
             if(container->currentWidget() == nullptr){
-                auto parent = splitw->parent();
+                auto parent = (QWidget*)splitw->parent();
                 container->close();
                 splitw->close();
+                parent->close();
             }
         });
         container->open(newpane, Qt::Orientation::Horizontal);
@@ -296,7 +332,6 @@ void SubView::openCFGView(UIContext *context, ViewFrame *vf){
     auto linearviews = main->findChildren<LinearView*>();
     LinearView* linearview;
     if(linearviews.size() != 0){
-        qDebug() << "found linear views";
         linearview = linearviews[0];
     }
     auto flowGraph = new DisassemblyContainer((QWidget*)vf->parent(), bv, vf, linearview->getCurrentFunction());
@@ -308,7 +343,6 @@ void SubView::openCFGView(UIContext *context, ViewFrame *vf){
 
 void SubView::openLinearView(UIContext *context, ViewFrame* vf){
     BinaryViewRef bv = context->getCurrentViewFrame()->getCurrentBinaryView();
-    SplitPaneContainer* split_container = (SplitPaneContainer*)vf->parent()->parent();
     QMainWindow* main = context->mainWindow();
     auto linearviews = main->findChildren<LinearView*>();
     auto container = new SplitTabWidget(collection);
@@ -317,30 +351,28 @@ void SubView::openLinearView(UIContext *context, ViewFrame* vf){
         if(linear->getData() != bv){
             continue;
         }
+        auto split_container = (SplitPaneContainer*)get_parent_from_type(linear, "SplitPaneContainer");
+        auto splitter = (Splitter*)get_parent_from_type(linear, "Splitter");
+        auto root_pane = (SplitPaneWidget*)get_parent_from_type(linear, "SplitPaneWidget");
+        auto vp = (ViewPane*)get_parent_from_type(linear, "ViewPane");
         linear->installEventFilter(new ClickFilter(main));
         QString viewname = QString("LinearView %1").arg(QString::number(counter++));
-        auto header_status = linear->getStatusBarWidget();
-        auto header_options = linear->getHeaderOptionsWidget();
-        auto header_subtypes = linear->getHeaderSubtypeWidget();
-        QSplitter* widget = new QSplitter();
-        QSplitter* header = new QSplitter();
-        header->setSizes(QList<int>{1, INT_MAX});
-        header->addWidget(header_options);
-        static_cast<QWidget*>(header_status->children()[2])->setVisible(false);
-        header->addWidget(header_status);
-        header->setStretchFactor(0, 0);
-        header->setStretchFactor(1, 1);
-        widget->setOrientation(Qt::Orientation::Vertical);
-        widget->addWidget(header);
-        widget->addWidget(linear);
+        auto widget = new QSplitter();
+        widget->setOrientation(Qt::Vertical);
+        for(auto child : vp->findChildren<QWidget*>(Qt::FindDirectChildrenOnly)){
+            widget->addWidget(child);
+        }
         TabPane* newpane = new TabPane(container, widget, viewname.toStdString().c_str());
+        root_pane->open(newpane, Qt::Horizontal);
+        split_container->layout()->removeWidget(vp);
+        for(auto child : vp->children()){
+            delete child;
+        }
 
-        split_container->open(newpane, Qt::Orientation::Horizontal);
-        auto root = split_container->root();
-        auto splitter = root->findChild<Splitter*>();
-        // As the children are listed from the first to the last, it should be this one everytime
-        auto old_container = splitter->findChildren<SplitPaneContainer*>()[0];
-        old_container->close();
+        // Clear out the viewpane
+        auto vpp = (SplitPaneContainer*)vp->parent();
+        // vpp->close();
+        newpane->parent()->installEventFilter(new ContainerFilter(main));
     }
 }
 
@@ -361,6 +393,12 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
         "requiresRestart" : true
         })");
     }
+    auto val = settings->Get<int64_t>("subviews.enabled", bv);
+    if(val == 2){
+        // This crashes, find why
+        // UIContext::unregisterNotification(m_instance);
+        return;
+    }
     if(!settings->Contains("subviews.disabled_views")){
         settings->RegisterSetting("subviews.disabled_views", R"|({
         "title" : "Lists the widgets that should be disabled",
@@ -371,7 +409,6 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
         "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
         })|");
     }
- // = {"StackView", "LinearView", "VariableList"};
     if(!settings->Contains("subviews.refreshable_views")){
         settings->RegisterSetting("subviews.refreshable_views", R"|({
         "title" : "Lists the widgets that should refreshed on click",
@@ -381,12 +418,6 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
         "description" : "Refresh widget content when clicking in linearview",
         "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
         })|");
-    }
-    auto val = settings->Get<int64_t>("subviews.enabled", bv);
-    if(val == 2){
-        // This crashes, find why
-        // UIContext::unregisterNotification(m_instance);
-        return;
     }
     auto disabled = settings->Get<std::vector<std::string>>("subviews.disabled_views", bv); for(auto d : disabled){
         disabled_views.insert(QString(d.c_str()));
@@ -482,4 +513,3 @@ void SubView::OnViewChange(UIContext *context, ViewFrame *frame, const QString &
         }
     }
 }
-

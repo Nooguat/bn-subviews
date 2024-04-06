@@ -86,12 +86,14 @@ class TabPane : public Pane {
 Q_OBJECT
     QString m_title;
     SplitTabWidget* m_container;
+    ViewPane* m_vp;
 public:
     TabPane(SplitTabWidget* container, QWidget* widget, QString title, PaneHeader* header=nullptr);
     virtual QString title() override {return m_title;};
     virtual void updateStatus() override;
     virtual bool event(QEvent* event) override;
     SplitTabWidget* getContainer() {return m_container;};
+    ViewFrame* viewFrame() const;
 
 Q_SIGNALS:
     void updateWidgetStatus();
