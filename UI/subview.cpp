@@ -10,13 +10,10 @@
 #include "ui/action.h"
 #include "ui/linearview.h"
 #include "ui/pane.h"
-#include "ui/render.h"
-#include "ui/scriptingconsole.h"
 #include "ui/sidebar.h"
 #include <cstdint>
 #include <fmt/core.h>
 #include <fmt/ranges.h>
-#include <ios>
 #include <qaccessible_base.h>
 #include <qalgorithms.h>
 #include <qboxlayout.h>
@@ -35,10 +32,8 @@
 #include <qshortcut.h>
 #include <qsizepolicy.h>
 #include <qsplitter.h>
-#include <stack>
 #include <ui/viewframe.h>
 #include <vector>
-#include "DockableSidebar.h"
 #include "BWindow.h"
 #include "binaryninja-api/ui/linearview.h"
 #include "ui/sidebaricons.h"
@@ -46,7 +41,6 @@
 #include "ui/splitter.h"
 #include "ui/stackview.h"
 #include "ui/tabwidget.h"
-#include "ui/typeview.h"
 #include "ui/uicontext.h"
 #include "ui/uitypes.h"
 #include "ui/disassemblyview.h"
@@ -123,18 +117,6 @@ ClickFilter::ClickFilter(QMainWindow* main) : QObject(){
     m_main = main;
 }
 
-ContainerFilter::ContainerFilter(QMainWindow* main) : QObject(){
-    m_main = main;
-}
-
-ViewFilter::ViewFilter(QMainWindow* main) : QObject(){
-    m_main = main;
-}
-
-bool ViewFilter::eventFilter(QObject* watched, QEvent*event){
-    qDebug() << watched->metaObject()->className() << event;
-    return true;
-}
 
 bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
     if(event->type() == QEvent::MouseButtonRelease){
@@ -172,43 +154,6 @@ bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
     return false;
 }
 
-// TODO Fix the segfault at the end of program exec, we need to clear up the filter
-bool ContainerFilter::eventFilter(QObject* watched, QEvent* event){
-    if(event->type() == QEvent::Leave || event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildPolished){
-        qDebug() << event->type();
-        auto main = get_parent_from_type(watched, "MainWindow");
-        if(main == nullptr){
-            event->ignore();
-            return false;
-        }
-        for(auto child : main->findChildren<SplitPaneContainer*>()){
-            qDebug() << child << child->children();
-            if(child->findChild<SplitPaneContainer*>() != nullptr || child->findChild<LinearView*>() != nullptr){
-                qDebug() << "continue";
-                continue;
-            }
-            if(child->findChild<ViewPane*>() != nullptr ){
-                child->setVisible(false);
-            }
-            else if(child->findChild<TabPane*>() != nullptr){
-               auto pane = child->findChild<TabPane*>();
-               auto widget = child->findChild<SidebarWidget*>();
-               if(widget == nullptr){
-                    qDebug() << "closing empty tabpane" << pane->children();
-                    pane->closePane();
-                    child->close();
-               }
-            }
-            else{
-                qDebug() << child << "should close now" << child->children();
-                child->closeCurrentPane();
-            }
-        qDebug() << "------------------------";
-        }
-    }
-    event->ignore();
-    return true;
-}
 
 void SubViewBarStyle::paintTab(const QWidget* widget, QStylePainter& p, const DockableTabInfo& info, int idx, int count, int active, DockableTabInteractionState state, const QRect& rect) const{
 
@@ -238,11 +183,9 @@ void SubView::hideSidebar(const UIActionContext& action){
 TabPane::TabPane(SplitTabWidget* container, QWidget* widget, QString name, PaneHeader* default_header) : Pane(container){
     if(default_header == nullptr){
         auto header = new WidgetPaneHeader("");
-        // header->installEventFilter(new ContainerFilter());
         Pane::init(header);
     }
     else{
-        // default_header->installEventFilter(new ContainerFilter());
         Pane::init(default_header);
     }
     container->addTab(widget, name);
@@ -359,7 +302,6 @@ void SubView::addView(UIContext *context, QString viewtype){
                 return;
             }
             // This will close everything when trying to move a tab while other tabs exists
-            // qDebug() << "new widget : " << container->currentWidget();
             if(container->count() == 0){
                 qDebug() << "widget is null !";
                 auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
@@ -400,6 +342,10 @@ void SubView::openCFGView(UIContext *context, ViewFrame *vf){
 
 
 void SubView::openLinearView(UIContext *context, ViewFrame* vf){
+
+}
+
+void SubView::initView(UIContext *context, ViewFrame* vf){
     BinaryViewRef bv = context->getCurrentViewFrame()->getCurrentBinaryView();
     QMainWindow* main = context->mainWindow();
     auto linearviews = main->findChildren<LinearView*>();
@@ -475,7 +421,7 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     }
     auto val = settings->Get<int64_t>("subviews.enabled", bv);
     if(val == 2){
-        // This crashes, find why
+        // TODO find the root cause for this segfault
         // UIContext::unregisterNotification(m_instance);
         return;
     }
@@ -491,11 +437,21 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     }
     if(!settings->Contains("subviews.refresh_actions")){
         settings->RegisterSetting("subviews.refresh_actions", R"|({
-        "title" : "Lists the actions to call upon linear view updates",
+        "title" : "Refresh actions",
         "type" : "array",
         "elementType" : "string",
         "default" : ["VarRefresh", "StackRefresh"],
         "description" :"Add global actions that should be called when the linear view is updated (e.g. when clicking to another place). Useful for custom widgets that needs to be updated at this rate",
+        "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
+        })|");
+    }
+    if(!settings->Contains("subviews.prevent_duplicates")){
+        settings->RegisterSetting("subviews.prevent_duplicates", R"|({
+        "title" : "Prevent duplicates",
+        "type" : "array",
+        "elementType" : "string",
+        "default" : ["IPython"],
+        "description" :"Prevent widgets in this list to have duplicates in the main view",
         "ignore" : ["SettingsProjectScope", "SettingsUserScope"]
         })|");
     }
@@ -516,8 +472,11 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     for(auto r : refresh){
         refresh_actions.insert(QString(r.c_str()));
     }
+    auto duplicates = settings->Get<std::vector<std::string>>("subviews.prevent_duplicates", bv);
+    for(auto d : duplicates){
+        refresh_actions.insert(QString(d.c_str()));
+    }
     auto hide = settings->Get<int64_t>("subviews.hide_sidebars", bv);
-    qDebug() << "hide value" << hide;
     if(hide == 2){
         qDebug() << "hiding sidebars...";
         QMainWindow* main = context->mainWindow();
@@ -575,7 +534,6 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     }));
     subviews->addAction(openSubView);
     views->addMenu(subviews);
-    // Add open cfg view
     QAction *openCFG = new QAction("CFG View");
     QString actionNameCFG = QString("Open CFG View");
     UIAction::registerAction(actionNameCFG);
@@ -587,7 +545,7 @@ void SubView::OnAfterOpenFile(UIContext* context, FileContext* file, ViewFrame* 
     });
     subviews->addAction(openCFG);
     views->addMenu(subviews);
-    openLinearView(context, frame);
+    initView(context, frame);
 }
 
 void SubView::OnContextOpen(UIContext* context)

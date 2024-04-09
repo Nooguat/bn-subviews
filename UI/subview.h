@@ -31,6 +31,7 @@ public:
     static void openView(const UIActionContext& action);
     static void addView(UIContext *context, QString viewtype);
     static void hideSidebar(const UIActionContext& action);
+    static void initView(UIContext* context, ViewFrame* vf);
     static void openLinearView(UIContext* context, ViewFrame* vf);
     static void openCFGView(UIContext* context, ViewFrame* vf);
     static void reloadModule(const UIActionContext& action);
