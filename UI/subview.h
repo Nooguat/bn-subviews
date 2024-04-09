@@ -8,8 +8,10 @@
 #include "ui/linearview.h"
 #include "ui/uitypes.h"
 #include "ui/viewframe.h"
+#include <qcoreevent.h>
 #include <qmainwindow.h>
 #include <qaction.h>
+#include <qobject.h>
 #include <qtmetamacros.h>
 #include "ui/disassemblyview.h"
 
@@ -33,28 +35,31 @@ public:
     static void openCFGView(UIContext* context, ViewFrame* vf);
     static void reloadModule(const UIActionContext& action);
     static void NavigateBack(const UIActionContext& context);
-    // Need those as the 'navigate' action is not replicated when moving the LV
+    // Needed those for LV before, could be useful someday
     static void back(const UIActionContext& context);
     static void forward(const UIActionContext& context);
+    static void refresh_var(const UIActionContext& context);
+    static void refresh_stack(const UIActionContext& context);
+
 private:
     static bool m_hide;
     static int m_cfg_count;
 };
 
 
-class ContainerFilter : public QObject {
+class ViewFilter : public QObject {
 public:
-    ContainerFilter(QMainWindow* main);
-    ContainerFilter(){};
+    ViewFilter(QMainWindow* main);
+    ViewFilter(){};
     bool eventFilter(QObject* watched, QEvent* event) override;
 private:
     QMainWindow* m_main;
 };
 
-class TabFilter : public QObject {
+class ContainerFilter : public QObject {
 public:
-    TabFilter(QMainWindow* main);
-    TabFilter(){};
+    ContainerFilter(QMainWindow* main);
+    ContainerFilter(){};
     bool eventFilter(QObject* watched, QEvent* event) override;
 private:
     QMainWindow* m_main;
@@ -66,13 +71,6 @@ public:
     bool eventFilter(QObject *watched, QEvent *event) override;
 private:
     QMainWindow* m_main;
-};
-
-class LinearPane : public LinearView {
-public:
-    LinearPane(BinaryViewRef data, ViewFrame* view);
-private:
-    DisassemblyContainer* m_graph;
 };
 
 class SubViewBarStyle : public DockableTabStyle {
