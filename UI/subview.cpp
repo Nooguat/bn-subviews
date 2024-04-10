@@ -32,6 +32,9 @@
 #include <qshortcut.h>
 #include <qsizepolicy.h>
 #include <qsplitter.h>
+#include <qtextformat.h>
+#include <qwidget.h>
+#include <system_error>
 #include <ui/viewframe.h>
 #include <vector>
 #include "BWindow.h"
@@ -55,35 +58,10 @@ DockableTabCollection* collection = new DockableTabCollection();
 std::set<QString> disabled_views;
 std::set<QString> refresh_actions;
 std::set<QString> protect_duplication;
+std::set<DockableTabWidget*> tabs;
+std::set<SplitPaneContainer*> containers;
 // Hardcoded, cannot use GlobalArea as in the v3
 std::set<QString> area_wigets = {"ScriptingConsole", "LogView"};
-QLayout* findParentLayout(QWidget* w, QLayout* topLevelLayout)
-{
-    for (QObject* qo: topLevelLayout->children())
-    {
-        QLayout* layout = qobject_cast<QLayout*>(qo);
-        if (layout != nullptr)
-        {
-            if (layout->indexOf(w) > -1)
-                return layout;
-            else if (!layout->children().isEmpty())
-            {
-                layout = findParentLayout(w, layout);
-                if (layout != nullptr)
-                    return layout;
-            }
-        }
-    }
-    return nullptr;
-}
-
-QLayout* findParentLayout(QWidget* w)
-{
-    if (w->parentWidget() != nullptr)
-        if (w->parentWidget()->layout() != nullptr)
-            return findParentLayout(w, w->parentWidget()->layout());
-    return nullptr;
-}
 
 QObject* get_parent_from_type(QObject* base, std::string className){
     QObject* parent = base->parent();
@@ -113,6 +91,32 @@ QMenu* findMenu(QList<QAction*> actions, QString name){
 SubViewBarStyle::SubViewBarStyle() : DockableTabStyle()
 {}
 
+ContainerFilter::ContainerFilter(QMainWindow* main) : QObject(){
+    m_main = main;
+}
+
+bool ContainerFilter::eventFilter(QObject* watched, QEvent *event){
+    if(event->type() == QEvent::Destroy){
+    //     qDebug() << "destroyed called ";
+    //     auto tabcontainer = (DockableTabWidget*)get_parent_from_type(watched, "DockableTabWidget");
+    //     auto container = (SplitTabWidget*)get_parent_from_type(watched, "SplitTabWidget");
+    //     auto widget = (QWidget*)watched;
+    //     // qDebug() << "trying to close container, need to clean up the tabs first";
+    //     event->accept();
+    //     qDebug() << "before unregister " << tabcontainer->count();
+    //     collection->unregisterContainer(tabcontainer);
+    //     qDebug() << tabcontainer->indexOf(widget);
+    //     auto index = tabcontainer->indexOf(widget);
+    //     qDebug() << tabcontainer->widget(index);
+    //     tabcontainer->removeTab(index);
+    //     qDebug() << "after unregister " << tabcontainer->count();
+    //     qDebug() << tabcontainer->widget(index);
+        // return false;
+    }
+    // event->ignore();
+    return true;
+}
+
 ClickFilter::ClickFilter(QMainWindow* main) : QObject(){
     m_main = main;
 }
@@ -131,11 +135,6 @@ bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
                 widget->repaint();
             }
         }
-        auto main = get_parent_from_type(watched, "MainWindow");
-        if(main == nullptr){
-            event->ignore();
-            return false;
-        }
         linearview->notifyRefresh();
         auto container = (SplitPaneWidget*)get_parent_from_type(watched, "SplitPaneWidget");
         auto vf = (ViewFrame*)get_parent_from_type(watched, "ViewFrame");
@@ -150,7 +149,7 @@ bool ClickFilter::eventFilter(QObject *watched, QEvent *event){
         for(auto action : refresh_actions){
             handler->executeAction(action);
         }
-    }
+   }
     return false;
 }
 
@@ -180,6 +179,13 @@ void SubView::hideSidebar(const UIActionContext& action){
     return;
 }
 
+void TabPane::endPane(){
+    qDebug() << "called";
+    this->removeEventFilter(m_filter);
+    m_container->removeTab(m_widget);
+    return;
+}
+
 TabPane::TabPane(SplitTabWidget* container, QWidget* widget, QString name, PaneHeader* default_header) : Pane(container){
     if(default_header == nullptr){
         auto header = new WidgetPaneHeader("");
@@ -188,22 +194,24 @@ TabPane::TabPane(SplitTabWidget* container, QWidget* widget, QString name, PaneH
     else{
         Pane::init(default_header);
     }
-    container->addTab(widget, name);
-    container->update();
+    connect(this, &Pane::paneCloseRequested, this, &TabPane::endPane);
+    auto main = (QMainWindow*)get_parent_from_type(container, "MainWindow");
     m_container = container;
-    auto first = collection->containers().begin();
-    auto tabwidget = *first;
-    auto tabbar = tabwidget->tabBar();
+    m_container->addTab(widget, name);
+    m_widget = widget;
+    m_filter = new ContainerFilter(main);
+    // auto first = collection->containers().begin();
+    // auto tabwidget = *first;
+    // auto tabbar = tabwidget->tabBar();
+    this->installEventFilter(m_filter);
     // auto style = new SubViewBarStyle();
     // tabbar->setTabStyle(style);
-
 }
 
 void TabPane::updateStatus(){
     updateWidgetStatus();
     return Pane::updateStatus();
 }
-
 
 bool TabPane::event(QEvent* event){
     return QWidget::event(event);
@@ -270,7 +278,7 @@ void SubView::addView(UIContext *context, QString viewtype){
         qDebug() << "frame is null";
         return;
     }
-    qDebug() << "frame " << frame << main->findChild<ViewFrame*>();
+    // qDebug() << "frame " << frame << main->findChild<ViewFrame*>();
     BinaryViewRef bv = frame->getCurrentBinaryView();
     auto lv = main->findChild<LinearView*>();
     auto container = (SplitPaneContainer*)get_parent_from_type(frame, "SplitPaneContainer");
@@ -279,8 +287,15 @@ void SubView::addView(UIContext *context, QString viewtype){
     }
     auto sidebar = context->sidebar();
     auto types = sidebar->types();
+    // for(auto c : collection->containers()){
+    //     qDebug() << c;
+    // }
     for(auto type: types){
         if(type->name().compare(viewtype) == 0){
+        // Check if type is protected against multiple instances
+        if(protect_duplication.find(type->name()) != protect_duplication.end()){
+           qDebug() << "TODO Implement the duplication prevention";
+        }
         QSplitter* view = new QSplitter();
         view->setOrientation(Qt::Orientation::Vertical);
         auto newview = type->createWidget(frame, bv);
@@ -294,36 +309,59 @@ void SubView::addView(UIContext *context, QString viewtype){
         }
         view->addWidget(newview);
         auto splitw = new SplitTabWidget(collection);
+        // QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](QWidget* widget){
+        //     qDebug() << "signal called";
+        //         auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
+        //         // splitw->close();
+            // auto container = splitw->findChild<DockableTabWidget*>();
+            // if(container == nullptr){
+            //     return;
+            // }
+            // // This will close everything when trying to move a tab while other tabs exists
+            // if(container->currentWidget() == nullptr){
+            //     qDebug() << "widget is null !";
+            //     auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
+            //     // splitw->close();
+            //     if(parent != nullptr){
+            //         parent->closeCurrentPane();
+            //     }
+            // }
+        // });
         TabPane* newpane = new TabPane(splitw, view, type->name());
-        context->getCurrentActionHandler()->updateActionBindings("refresh");
-        QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](){
-            auto container = splitw->findChild<DockableTabWidget*>();
-            if(container == nullptr){
-                return;
-            }
-            // This will close everything when trying to move a tab while other tabs exists
-            if(container->count() == 0){
-                qDebug() << "widget is null !";
-                auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
-                // splitw->close();
-                if(parent != nullptr){
-                    parent->closeCurrentPane();
-                }
-            }
-        });
-        container->open(newpane, Qt::Orientation::Horizontal);
-        auto sidebars = main->findChildren<Sidebar*>();
-        for(auto sb : sidebars){
-            for(auto child : sb->findChildren<SidebarWidget*>()){
-                if(child->metaObject()->className() == viewtype){
-                    child->closing();
-                }
+        for(auto tab : splitw->findChildren<DockableTabWidget*>()){
+            if(tabs.find(tab) == tabs.end()){
+                QObject::connect(tab, &DockableTabWidget::tabCloseRequested, [=]() {
+                    qDebug() << "close called";
+                    qDebug() << tab->currentWidget();
+                    if(tab->currentWidget() == nullptr){
+                        tab->close();
+                    }
+                    // if(tab->count() == 0){
+                    //     qDebug() << "empty !";
+                    // }
+                });
+                QObject::connect(tab, &DockableTabWidget::tabRemovedForReparent, [=]() {
+                    qDebug() << "moved called";
+                    qDebug() << tab->currentWidget();
+                    if(tab->currentWidget() == nullptr){
+                        tab->close();
+                    }
+                    // if(tab->count() == 0){
+                    //     qDebug() << "empty !";
+                    // }
+                });
+                tabs.insert(tab);
             }
         }
-        // newpane->parent()->installEventFilter(new ContainerFilter(main));
+        // if(containers.find(container) == containers.end()){
+        //    container->installEventFilter(new ContainerFilter(main));
+        //    containers.insert(container);
+        // }
+        container->open(newpane, Qt::Orientation::Horizontal);
+        // We don't need to continue
+        break;
         }
     }
-
 }
 
 void SubView::openCFGView(UIContext *context, ViewFrame *vf){
@@ -342,7 +380,13 @@ void SubView::openCFGView(UIContext *context, ViewFrame *vf){
 
 
 void SubView::openLinearView(UIContext *context, ViewFrame* vf){
-
+    BinaryViewRef bv = context->getCurrentViewFrame()->getCurrentBinaryView();
+    QMainWindow* main = context->mainWindow();
+    // TODO Find a way to have at least all the actions from normal linear view
+    auto linearview = new LinearView(bv, vf);
+    auto container = (SplitPaneContainer*)get_parent_from_type(vf, "SplitPaneContainer");
+    TabPane* newpane = new TabPane(new SplitTabWidget(collection), linearview, "Linear View");
+    container->open(newpane, Qt::Orientation::Horizontal);
 }
 
 void SubView::initView(UIContext *context, ViewFrame* vf){
@@ -366,39 +410,30 @@ void SubView::initView(UIContext *context, ViewFrame* vf){
         for(auto child : vp->findChildren<QWidget*>(Qt::FindDirectChildrenOnly)){
             widget->addWidget(child);
         }
-        QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](){
-            auto container = splitw->findChild<DockableTabWidget*>();
-            if(container == nullptr){
-                return;
-            }
-            // This will close everything when trying to move a tab while other tabs exists
-            qDebug() << "new widget : " << container->currentWidget();
-            if(container->count() == 0){
-                qDebug() << "widget is null !";
-                auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
-                if(parent != nullptr){
-                    parent->closeCurrentPane();
-                }
-                // splitw->close();
-            }
-        });
-        qDebug() << widget->children();
+        // QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](){
+        //     auto container = splitw->findChild<DockableTabWidget*>();
+        //     if(container == nullptr){
+        //         return;
+        //     }
+        //     // This will close everything when trying to move a tab while other tabs exists
+        //     qDebug() << "new widget : " << container->currentWidget();
+        //     if(container->count() == 0){
+        //         qDebug() << "widget is null !";
+        //         auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
+        //         if(parent != nullptr){
+        //             parent->closeCurrentPane();
+        //         }
+        //     }
+        // });
         TabPane* newpane = new TabPane(splitw, widget, viewname.toStdString().c_str());
-        // vp->installEventFilter(new ViewFilter(main));
         widget->addWidget(vp);
         vp->updateStatus();
         vp->setParent(widget);
         root_pane->open(newpane, Qt::Horizontal);
         split_container->layout()->removeWidget(vp);
-        // for(auto child : vp->children()){
-        //     delete child;
-        // }
         context->getCurrentActionHandler()->reparentWidget(linear);
-        // Clear out the viewpane
-        auto vpp = (SplitPaneContainer*)vp->parent();
+        auto vpp = (SplitPaneContainer*)get_parent_from_type(vp, "SplitPaneContainer");
         vpp->hide();
-        // vpp->closeCurrentPane();
-        // newpane->parent()->installEventFilter(new ContainerFilter(main));
     }
 }
 

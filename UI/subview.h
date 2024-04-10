@@ -81,16 +81,26 @@ public:
         int active, DockableTabInteractionState state, const QRect& rect) const override;
 };
 
+class TabPaneHeader : public WidgetPaneHeader {
+Q_OBJECT
+public:
+    TabPaneHeader() : WidgetPaneHeader("") {};
+    void paneCloseRequested();
+};
+
 class TabPane : public Pane {
 Q_OBJECT
     QString m_title;
     SplitTabWidget* m_container;
+    QWidget* m_widget;
     ViewPane* m_vp;
+    ContainerFilter* m_filter;
 public:
     TabPane(SplitTabWidget* container, QWidget* widget, QString title, PaneHeader* header=nullptr);
     virtual QString title() override {return m_title;};
     virtual void updateStatus() override;
     virtual bool event(QEvent* event) override;
+    void endPane();
     SplitTabWidget* getContainer() {return m_container;};
     ViewFrame* viewFrame() const;
 
