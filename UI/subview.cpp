@@ -8,6 +8,7 @@
 #include "binaryninjaapi.h"
 #include "binaryninjacore.h"
 #include "ui/action.h"
+#include "ui/globalarea.h"
 #include "ui/linearview.h"
 #include "ui/pane.h"
 #include "ui/sidebar.h"
@@ -96,24 +97,6 @@ ContainerFilter::ContainerFilter(QMainWindow* main) : QObject(){
 }
 
 bool ContainerFilter::eventFilter(QObject* watched, QEvent *event){
-    if(event->type() == QEvent::Destroy){
-    //     qDebug() << "destroyed called ";
-    //     auto tabcontainer = (DockableTabWidget*)get_parent_from_type(watched, "DockableTabWidget");
-    //     auto container = (SplitTabWidget*)get_parent_from_type(watched, "SplitTabWidget");
-    //     auto widget = (QWidget*)watched;
-    //     // qDebug() << "trying to close container, need to clean up the tabs first";
-    //     event->accept();
-    //     qDebug() << "before unregister " << tabcontainer->count();
-    //     collection->unregisterContainer(tabcontainer);
-    //     qDebug() << tabcontainer->indexOf(widget);
-    //     auto index = tabcontainer->indexOf(widget);
-    //     qDebug() << tabcontainer->widget(index);
-    //     tabcontainer->removeTab(index);
-    //     qDebug() << "after unregister " << tabcontainer->count();
-    //     qDebug() << tabcontainer->widget(index);
-        // return false;
-    }
-    // event->ignore();
     return true;
 }
 
@@ -181,8 +164,16 @@ void SubView::hideSidebar(const UIActionContext& action){
 
 void TabPane::endPane(){
     qDebug() << "called";
-    this->removeEventFilter(m_filter);
-    m_container->removeTab(m_widget);
+    m_container->closeTab(this);
+    m_container->close();
+    auto root_pane = (SplitPaneWidget*)get_parent_from_type(m_container, "SplitPaneWidget");
+    // Linearview should never be closed, so it's a good catch point
+    auto linear = root_pane->findChild<LinearView*>();
+    auto new_parent = (QSplitter*)get_parent_from_type(linear, "QSplitter");
+    // This allows to closePane, if this is deleted everything will crash
+    new_parent->addWidget(m_container);
+    // collection->unregisterContainer(m_container);
+    // m_container->deleteLater();
     return;
 }
 
@@ -194,16 +185,18 @@ TabPane::TabPane(SplitTabWidget* container, QWidget* widget, QString name, PaneH
     else{
         Pane::init(default_header);
     }
+    qDebug() << this->children();
+    auto button = this->findChild<CloseButton*>();
+    qDebug() << button;
+    button->hide();
     connect(this, &Pane::paneCloseRequested, this, &TabPane::endPane);
     auto main = (QMainWindow*)get_parent_from_type(container, "MainWindow");
     m_container = container;
     m_container->addTab(widget, name);
     m_widget = widget;
-    m_filter = new ContainerFilter(main);
     // auto first = collection->containers().begin();
     // auto tabwidget = *first;
     // auto tabbar = tabwidget->tabBar();
-    this->installEventFilter(m_filter);
     // auto style = new SubViewBarStyle();
     // tabbar->setTabStyle(style);
 }
@@ -309,24 +302,6 @@ void SubView::addView(UIContext *context, QString viewtype){
         }
         view->addWidget(newview);
         auto splitw = new SplitTabWidget(collection);
-        // QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](QWidget* widget){
-        //     qDebug() << "signal called";
-        //         auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
-        //         // splitw->close();
-            // auto container = splitw->findChild<DockableTabWidget*>();
-            // if(container == nullptr){
-            //     return;
-            // }
-            // // This will close everything when trying to move a tab while other tabs exists
-            // if(container->currentWidget() == nullptr){
-            //     qDebug() << "widget is null !";
-            //     auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
-            //     // splitw->close();
-            //     if(parent != nullptr){
-            //         parent->closeCurrentPane();
-            //     }
-            // }
-        // });
         TabPane* newpane = new TabPane(splitw, view, type->name());
         for(auto tab : splitw->findChildren<DockableTabWidget*>()){
             if(tabs.find(tab) == tabs.end()){
@@ -334,29 +309,37 @@ void SubView::addView(UIContext *context, QString viewtype){
                     qDebug() << "close called";
                     qDebug() << tab->currentWidget();
                     if(tab->currentWidget() == nullptr){
-                        tab->close();
+                        splitw->closeTab(newpane);
+                        splitw->close();
+                        auto parent = (TabPane*)splitw->parentWidget();
+                        auto root_pane = (SplitPaneWidget*)get_parent_from_type(splitw, "SplitPaneWidget");
+                        // Linearview should never be closed, so it's a good catch point
+                        auto linear = root_pane->findChild<LinearView*>();
+                        auto new_parent = (QSplitter*)get_parent_from_type(linear, "QSplitter");
+                        // This allows to closePane, if this is deleted everything will crash
+                        new_parent->addWidget(splitw);
+                        newpane->closePane();
                     }
-                    // if(tab->count() == 0){
-                    //     qDebug() << "empty !";
-                    // }
                 });
                 QObject::connect(tab, &DockableTabWidget::tabRemovedForReparent, [=]() {
                     qDebug() << "moved called";
                     qDebug() << tab->currentWidget();
                     if(tab->currentWidget() == nullptr){
-                        tab->close();
+                        splitw->closeTab(newpane);
+                        splitw->close();
+                        auto parent = (TabPane*)splitw->parentWidget();
+                        auto root_pane = (SplitPaneWidget*)get_parent_from_type(splitw, "SplitPaneWidget");
+                        // Linearview should never be closed, so it's a good catch point
+                        auto linear = root_pane->findChild<LinearView*>();
+                        auto new_parent = (QSplitter*)get_parent_from_type(linear, "QSplitter");
+                        // This allows to closePane, if this is deleted everything will crash
+                        new_parent->addWidget(splitw);
+                        newpane->closePane();
                     }
-                    // if(tab->count() == 0){
-                    //     qDebug() << "empty !";
-                    // }
                 });
                 tabs.insert(tab);
             }
         }
-        // if(containers.find(container) == containers.end()){
-        //    container->installEventFilter(new ContainerFilter(main));
-        //    containers.insert(container);
-        // }
         container->open(newpane, Qt::Orientation::Horizontal);
         // We don't need to continue
         break;
@@ -410,21 +393,6 @@ void SubView::initView(UIContext *context, ViewFrame* vf){
         for(auto child : vp->findChildren<QWidget*>(Qt::FindDirectChildrenOnly)){
             widget->addWidget(child);
         }
-        // QObject::connect(splitw, &SplitTabWidget::currentChanged, [=](){
-        //     auto container = splitw->findChild<DockableTabWidget*>();
-        //     if(container == nullptr){
-        //         return;
-        //     }
-        //     // This will close everything when trying to move a tab while other tabs exists
-        //     qDebug() << "new widget : " << container->currentWidget();
-        //     if(container->count() == 0){
-        //         qDebug() << "widget is null !";
-        //         auto parent = (SplitPaneContainer*)get_parent_from_type(splitw, "SplitPaneContainer");
-        //         if(parent != nullptr){
-        //             parent->closeCurrentPane();
-        //         }
-        //     }
-        // });
         TabPane* newpane = new TabPane(splitw, widget, viewname.toStdString().c_str());
         widget->addWidget(vp);
         vp->updateStatus();
